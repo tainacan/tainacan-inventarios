@@ -200,32 +200,35 @@ class Restrict_Users_By_Team {
             $entity_id = $args[2];
 
             if ( is_numeric( $entity_id ) ) {
-                $item = \tainacan_items()->fetch( (int) $entity_id );
+                $current_item = \tainacan_items()->fetch( (int) $entity_id );
                 
-                if ( $item instanceof \Tainacan\Entities\Item && $item->get_status() != 'auto-draft') {
+                // A restrição de acesso se aplica apenas a itens
+                if ( $current_item instanceof \Tainacan\Entities\Item && $current_item->get_status() != 'auto-draft') {
                     $control_collections_ids = Control_Collections::get_instance()->get_control_collections_ids();
-                    $col_id = $item->get_collection_id();
+                    $current_collection_id = $current_item->get_collection_id();
 
-                    $allowed_users_ids = $this->get_allowed_users_ids($item);
+                    // Obtém os IDs dos usuários permitidos para editar o item (aqueles que fazem parte da equipe)
+                    $allowed_users_ids = $this->get_allowed_users_ids($current_item);
                     
+                    // Se o item está em uma coleção de controle, não há restrição de acesso
                     if ( 
                         $allowed_users_ids === false ||
-                        in_array($col_id, $control_collections_ids)
+                        in_array($current_collection_id, $control_collections_ids)
                     ) {
                         return $allcaps;
                     }
-                    $collection_id = $item->get_collection_id();
 
+                    // Se o usuário não está na lista de usuários permitidos, restringe o acesso
                     if ( !in_array($user->ID . '', $allowed_users_ids) ) {
                         $allcaps['read'] = false;
-                        $allcaps["tnc_col_{$collection_id}_edit_items"] = false;
-                        $allcaps["tnc_col_{$collection_id}_edit_others_items"] = false;
-                        $allcaps["tnc_col_{$collection_id}_edit_published_items"] = false;
-                        $allcaps["tnc_col_{$collection_id}_read_private_items"] = false;
-                        $allcaps["tnc_col_{$collection_id}_publish_items"] = false;
-                        $allcaps["tnc_col_{$collection_id}_delete_items"] = false;
-                        $allcaps["tnc_col_{$collection_id}_delete_others_items"] = false;
-                        $allcaps["tnc_col_{$collection_id}_delete_published_items"] = false;
+                        $allcaps["tnc_col_{$current_collection_id}_edit_items"] = false;
+                        $allcaps["tnc_col_{$current_collection_id}_edit_others_items"] = false;
+                        $allcaps["tnc_col_{$current_collection_id}_edit_published_items"] = false;
+                        $allcaps["tnc_col_{$current_collection_id}_read_private_items"] = false;
+                        $allcaps["tnc_col_{$current_collection_id}_publish_items"] = false;
+                        $allcaps["tnc_col_{$current_collection_id}_delete_items"] = false;
+                        $allcaps["tnc_col_{$current_collection_id}_delete_others_items"] = false;
+                        $allcaps["tnc_col_{$current_collection_id}_delete_published_items"] = false;
                     }
                 }
             }
@@ -239,12 +242,12 @@ class Restrict_Users_By_Team {
      * para buscar itens na API REST do Tainacan com base nos papéis do usuário e nos metadados restritivos.
      */
     public function fetch_items_args($args, $user) {
-        $exist_roles = !empty(array_intersect($this->get_restrictive_roles(), $user->roles));
+        $exist_restrictive_roles = !empty(array_intersect($this->get_restrictive_roles(), $user->roles));
         $post_type = $args['post_type'];
         
         // Se o usuário tem um papel restritivo e o tipo de post é um item de coleção...
         if (
-            $exist_roles &&
+            $exist_restrictive_roles &&
             isset($post_type) &&
             count($post_type) == 1 && 
             \strpos($post_type[0], 'tnc_col_' ) === 0
@@ -278,16 +281,16 @@ class Restrict_Users_By_Team {
             } else {
                 $current_collection = \tainacan_collections()->fetch($current_collection_id, 'OBJECT');
                 $query_args =   array(
-                        'meta_query' => [
-                            [
-                                'key'   => 'metadata_type',
-                                'value' => 'Tainacan\\Metadata_Types\\Relationship'
-                            ],
-                            [
-                                'key' => '_option_collection_id',
-                                'value' => $inventario_collection_id,
-                            ]
+                    'meta_query' => [
+                        [
+                            'key'   => 'metadata_type',
+                            'value' => 'Tainacan\\Metadata_Types\\Relationship'
+                        ],
+                        [
+                            'key' => '_option_collection_id',
+                            'value' => $inventario_collection_id,
                         ]
+                    ]
                 );
                 
                 $relationship_metadata = \tainacan_metadata()->fetch_by_collection($current_collection,
@@ -328,8 +331,7 @@ class Restrict_Users_By_Team {
             return $args;
         }
 
-        $roles = $user->roles;
-        $exist_restrictive_roles = !empty(array_intersect($this->get_restrictive_roles(), $roles));
+        $exist_restrictive_roles = !empty(array_intersect($this->get_restrictive_roles(), $user->roles));
 
         if ( $exist_restrictive_roles ) {
             $inventario_collection_id = Inventario_Post_Type::get_instance()->get_inventarios_collection_id();
@@ -343,7 +345,7 @@ class Restrict_Users_By_Team {
                     'meta_query' => [
                         [
                             'key'   => 'metadata_type',
-                            'value' => 'Tainacan\Metadata_Types\Relationship'
+                            'value' => 'Tainacan\\Metadata_Types\\Relationship'
                         ],
                         [
                             'key' => '_option_collection_id',
@@ -352,6 +354,9 @@ class Restrict_Users_By_Team {
                     ]
                 ), 'OBJECT'
             );
+            // Se não houver metadado de relacionamento, não há restrição de acesso.
+            // Neste caso não passamos um array vazio porque o WP entende que deve retornar os itens mais recentes
+            // mas não queremos isso. Ver https://core.trac.wordpress.org/ticket/28099.
             if ( empty($relationship_metadata) ) {
                 $args['post__in'] = [-1];
             } else {
@@ -373,6 +378,7 @@ class Restrict_Users_By_Team {
      */
     public function fetch_args($args, $type) {
         $user = \wp_get_current_user();
+
         if ( $type == 'items' ) {
         
             $has_filter_posts_pre_query = has_filter( 'posts_pre_query', '__return_empty_array' );

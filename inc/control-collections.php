@@ -31,7 +31,7 @@ class Control_Collections {
 
 	protected function init() {		
 
-		// Lógica para adicionar a opção de coleção de inventários nas configurações do Tainacan
+		// Lógica para adicionar a opção das coleções de controle nas configurações do Tainacan
 		add_action( 'admin_init', array( $this, 'settings_init' ) );
 
 		// Estiliza algumas áreas do Admin diferente para coleções de controle (ou metadados de relacionamento com elas)
@@ -257,7 +257,7 @@ class Control_Collections {
 
 	/**
 	 * Função que usa da action 'pre_get_posts' para filtrar a maioria das requisições feitas 
-	 * por coleções do tainacan, retirando as as coleções de controle
+	 * por coleções do tainacan, retirando as coleções de controle
 	 */
 	public function hide_control_collections_from_get_posts($query) {
 

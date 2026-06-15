@@ -11,10 +11,11 @@
  * inventário", ou seja, aquela que guardará os dados estruturados relacionados a cada inventário 
  * (seus itens). Também está implementada a lógica para criação de um Post Type 'inventarios'. Este
  * tipo de post permite que sejam criadas páginas usando editor de blocos do WordPress com 
- * flexibilidade para se customizar aparência de um conteúdo editorial mais livre. Por fim há a
- * lógica para se estabelecer um vínculo entre o item da coleção com a página de inventário, fazendo
- * com que os dois tipos de dados possam ser mostrados juntos para o público, mesmo que geridoos por
- * ferramentas diferentes (Tainacan e Gutenberg).
+ * flexibilidade para se customizar aparência de um conteúdo editorial mais livre. Ao se criar um
+ * Novo Inventário, um padrão de blocos é carregado. Também pode ser criado um padrão e definido
+ * como padrão para novos inventários. Por fim há a lógica para se estabelecer um vínculo entre o
+ * item da coleção com a página de inventário, fazendo com que os dois tipos de dados possam ser
+ * mostrados juntos para o público, mesmo que geridos por ferramentas diferentes (Tainacan e Gutenberg).
  */
 
 namespace Tainacan_Inventarios;
@@ -28,6 +29,7 @@ class Inventario_Post_Type {
 
     private $inventario_post_id_field = 'tainacan-inventarios-inventario-post-id';
     private $inventarios_collection_id_field = 'tainacan_inventarios_collection_id';
+    private $inventarios_default_pattern_id_field = 'tainacan_inventarios_default_pattern_id';
 
     protected function init() {
 
@@ -55,6 +57,7 @@ class Inventario_Post_Type {
 	 */
     public function settings_init() {
 
+        // Lógica para registrar a seção de configurações do plugin de inventários
 		add_settings_section(
 			'tainacan_settings_inventarios', // ID
 			__( 'Tainacan Inventários', 'tainacan-inventarios' ), // Title
@@ -62,6 +65,7 @@ class Inventario_Post_Type {
 			'tainacan_settings'               		    // Page
 		);
 		
+        // Lógica para montar a lista de coleções de Inventários
         $collections = \tainacan_collections()->fetch(array(), 'OBJECT');
         $collections_options = '';
 
@@ -83,6 +87,37 @@ class Inventario_Post_Type {
             'sanitize_callback' => 'sanitize_text_field',
             'default' => '',
 		) );
+
+        // Lógica para montar a lista de padrões de blocos
+        $patterns = get_posts(
+            array(
+                'post_type'              => 'wp_block',
+                'post_status'            => 'publish',
+                'posts_per_page'         => -1,
+                'orderby'                => 'title',
+                'order'                  => 'ASC',
+                'update_post_meta_cache' => false,
+                'update_post_term_cache' => false,
+            )
+        );
+
+        $patterns_options = '<option value="">' . esc_html__( 'Padrão do plugin', 'tainacan-inventarios' ) . '</option>';
+
+        foreach ( $patterns as $pattern ) {
+            $patterns_options .= '<option value="' . esc_attr( $pattern->ID ) . '">' . esc_html( $pattern->post_title ) . '</option>';
+        }
+
+        \Tainacan\Settings::get_instance()->create_tainacan_setting( array(
+            'id' => $this->inventarios_default_pattern_id_field,
+            'title' => __( 'Padrão de blocos para novos inventários', 'tainacan-inventarios' ),
+            'section' => 'tainacan_settings_inventarios',
+            'type' => 'string',
+            'input_type' => 'select',
+            'input_inner_html' => $patterns_options,
+            'description' => __( 'Selecione um padrão de blocos criado em Aparência → Editor → Padrões. Ele será usado como layout inicial ao criar um novo inventário. Deixe em "Padrão do plugin" para usar o layout embutido.', 'tainacan-inventarios' ),
+            'sanitize_callback' => 'sanitize_text_field',
+            'default' => '',
+        ) );
 
     }
 
@@ -129,7 +164,7 @@ class Inventario_Post_Type {
             'show_in_rest'       => true,
             'menu_position'      => null,
             'supports'           => array('title', 'editor', 'author', 'thumbnail', 'excerpt', 'comments', 'custom-fields'),
-            'template' => $this->get_inventario_template(),
+            'template'           => $this->get_inventario_template(),
         );
         register_post_type('inventarios', $args);
     }
@@ -260,63 +295,112 @@ class Inventario_Post_Type {
     }
 
     /**
-     * Array PHP de notação de Blocos Gutenberg contendo o template inicial de uma página de inventário.
-     * Com esta definição, ao criarmos um novo post do tipo Inventário no editor de blocos, os seguintes
-     * blocos já vem inseridos com algum conteúdo placeholder, deixando por conta do usuário a definição
-     * do restante da informação.
+     * Template inicial de novas páginas de inventário.
+     * Usa o padrão de blocos selecionado nas configurações ou o layout embutido do plugin.
      */
     function get_inventario_template() {
-        return [
-            [
+        $pattern_id = absint( $this->get_inventarios_default_pattern_id() );
+
+        if ( $pattern_id ) {
+            $pattern_post = get_post( $pattern_id );
+
+            if ( $pattern_post && $pattern_post->post_type === 'wp_block' && $pattern_post->post_status === 'publish' ) {
+                $template = $this->blocks_to_template( parse_blocks( $pattern_post->post_content ) );
+
+                if ( ! empty( $template ) ) {
+                    return apply_filters( 'tainacan_inventarios_default_template', $template );
+                }
+            }
+        }
+
+        return apply_filters( 'tainacan_inventarios_default_template', $this->get_builtin_inventario_template() );
+    }
+
+    /**
+     * Layout padrão embutido no plugin, usado quando nenhum padrão é selecionado.
+     */
+    function get_builtin_inventario_template() {
+        return array(
+            array(
                 'core/columns',
-                [
+                array(
                     'align' => 'wide',
-                ],
-                [
-                    [
+                ),
+                array(
+                    array(
                         'core/column',
-                        [
+                        array(
                             'width' => '33.33%',
-                        ],
-                        [
-                            [
+                        ),
+                        array(
+                            array(
                                 'tainacan/item-metadata-sections',
-                                [
+                                array(
                                     'collectionId' => $this->get_inventarios_collection_id(),
-                                ],
-                            ],
-                        ],
-                    ],
-                    [
+                                ),
+                            ),
+                        ),
+                    ),
+                    array(
                         'core/column',
-                        [
+                        array(
                             'width' => '66.66%',
-                        ],
-                        [
-                            [
+                        ),
+                        array(
+                            array(
                                 'core/post-title',
-                                [
-                                    'placeholder' => __('Título do Inventário', 'tainacan-inventarios'),
-                                    'level' => 1,
-                                ],
-                            ],
-                            [
+                                array(
+                                    'placeholder' => __( 'Título do Inventário', 'tainacan-inventarios' ),
+                                    'level'       => 1,
+                                ),
+                            ),
+                            array(
                                 'core/paragraph',
-                                [
-                                    'placeholder' => __('Insira aqui blocos apresentando o Inventário', 'tainacan-inventarios'),
-                                ],
-                            ],
-                            [
+                                array(
+                                    'placeholder' => __( 'Insira aqui blocos apresentando o Inventário', 'tainacan-inventarios' ),
+                                ),
+                            ),
+                            array(
                                 'tainacan/related-items-list',
-                                [
+                                array(
                                     'collectionId' => $this->get_inventarios_collection_id(),
-                                ],
-                            ],
-                        ],
-                    ],
-                ],
-            ],
-        ];
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        );
+    }
+
+    /**
+     * Converte blocos parseados em notação de template do CPT.
+     */
+    private function blocks_to_template( $blocks ) {
+        $template = array();
+
+        foreach ( $blocks as $block ) {
+            if ( empty( $block['blockName'] ) ) {
+                continue;
+            }
+
+            $item = array(
+                $block['blockName'],
+                ! empty( $block['attrs'] ) ? $block['attrs'] : array(),
+            );
+
+            if ( ! empty( $block['innerBlocks'] ) ) {
+                $inner_template = $this->blocks_to_template( $block['innerBlocks'] );
+
+                if ( ! empty( $inner_template ) ) {
+                    $item[] = $inner_template;
+                }
+            }
+
+            $template[] = $item;
+        }
+
+        return $template;
     }
 
     /**
@@ -324,6 +408,13 @@ class Inventario_Post_Type {
      */
     function get_inventarios_collection_id() {
         return get_option('tainacan_option_' . $this->inventarios_collection_id_field);
+    }
+
+    /**
+     * Método utilitário para acesso a option que guarda o ID do padrão de blocos padrão.
+     */
+    function get_inventarios_default_pattern_id() {
+        return get_option( 'tainacan_option_' . $this->inventarios_default_pattern_id_field );
     }
 }
 

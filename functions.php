@@ -2,13 +2,13 @@
 /*
 Plugin Name: Tainacan Inventários
 Description: Plugin para gerenciar inventários no Tainacan, baseando-se nos requisitos do INRC.
-Version: 0.1.0
+Version: 0.2.0
 Author: mateuswetah
 Text Domain: tainacan-inventarios
 Requires Plugins: tainacan
 */
 
-const TAINACAN_INVENTARIOS_VERSION = '0.1.0';
+const TAINACAN_INVENTARIOS_VERSION = '0.2.0';
 
 // Evita acesso direto ao arquivo
 defined( 'ABSPATH' ) or die( 'No script kiddies please!' );

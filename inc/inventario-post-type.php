@@ -238,8 +238,11 @@ class Inventario_Post_Type {
 			return '';
         
         $inventario_posts = get_posts( array(
-            'post_type' => 'inventarios'
+            'post_type'      => 'inventarios',
+            'posts_per_page' => -1,
+            'nopaging'       => true
         ) );
+   
 
 		ob_start();
 		?>

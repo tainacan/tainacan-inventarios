@@ -165,6 +165,7 @@ class Restrict_Users_By_Team {
         foreach ($item_metadata as $item_metadatum) {
             $metadatum = $item_metadatum->get_metadatum();
             
+            // Se estamos em um metadado de relacionamento, verificamos se o item está relacionado com um item de inventário
             if ( $metadatum->get_metadata_type() == 'Tainacan\\Metadata_Types\\Relationship' ) {
                 $options = $metadatum->get_metadata_type_options();
 
@@ -175,14 +176,24 @@ class Restrict_Users_By_Team {
                     $inventario_items_ids = $item_metadatum->get_value();
                     $inventario_items_ids = is_array($inventario_items_ids) ? $inventario_items_ids: [ $inventario_items_ids ];
 
-                    foreach($inventario_items_ids as $id) {
-                        $inventario_team_users = get_post_meta( $id, $team_metadatum_id );
+                    // Se está relacionado com a coleção do Inventário, obtemos os usuários da equipe do item de inventário
+                    foreach ($inventario_items_ids as $inventario_item_id) {
+                        $inventario_team_users = get_post_meta( $inventario_item_id, $team_metadatum_id );
 
                         if ( !$inventario_team_users ) continue;
 
                         $inventario_team_users = is_array($inventario_team_users) ? $inventario_team_users: [ $inventario_team_users ];
                         $team_users = array_merge($team_users, $inventario_team_users);
                     }
+                }
+
+            // Se estamos em um metadado de usuário, verificamos se é o metadado de equipe do item de inventário e se for obtemos a equipe
+            } else if ( $metadatum->get_metadata_type() == 'Tainacan\\Metadata_Types\\User' && $metadatum->get_id() == $team_metadatum_id ) {
+                $inventario_team_users = get_post_meta( $item->get_id(), $team_metadatum_id );
+
+                if ( $inventario_team_users ) {
+                    $inventario_team_users = is_array($inventario_team_users) ? $inventario_team_users: [ $inventario_team_users ];
+                    $team_users = array_merge($team_users, $inventario_team_users);
                 }
             }
         }
@@ -195,19 +206,18 @@ class Restrict_Users_By_Team {
      */
     public function user_has_cap_filter( $allcaps, $caps, $args, $user ) {
         $exist_roles = !empty(array_intersect($this->get_restrictive_roles(), $user->roles));
-        
+
         if ( $exist_roles && is_array($args) && count($args) >= 3 ) {
             $entity_id = $args[2];
 
             if ( is_numeric( $entity_id ) ) {
                 $current_item = \tainacan_items()->fetch( (int) $entity_id );
-                
                 // A restrição de acesso se aplica apenas a itens
                 if ( $current_item instanceof \Tainacan\Entities\Item && $current_item->get_status() != 'auto-draft') {
                     $control_collections_ids = Control_Collections::get_instance()->get_control_collections_ids();
                     $current_collection_id = $current_item->get_collection_id();
 
-                    // Obtém os IDs dos usuários permitidos para editar o item (aqueles que fazem parte da equipe)
+                    // Obtém os IDs dos usuários permitidos para ver e editar o item (aqueles que fazem parte da equipe)
                     $allowed_users_ids = $this->get_allowed_users_ids($current_item);
                     
                     // Se o item está em uma coleção de controle, não há restrição de acesso
@@ -217,7 +227,6 @@ class Restrict_Users_By_Team {
                     ) {
                         return $allcaps;
                     }
-
                     // Se o usuário não está na lista de usuários permitidos, restringe o acesso
                     if ( !in_array($user->ID . '', $allowed_users_ids) ) {
                         $allcaps['read'] = false;
@@ -361,10 +370,11 @@ class Restrict_Users_By_Team {
                 $args['post__in'] = [-1];
             } else {
                 $collections_ids = array_map( function($relationship_metadatum) { return $relationship_metadatum->get_collection_id(); }, $relationship_metadata );
-                $args['post__in'] = $collections_ids;
+                $args['post__in'] = array_merge($collections_ids, array($inventario_collection_id));
             }
         }
 
+        // Se o usuário não tem permissão de gerenciar o Tainacan, remove as coleções de controle da busca.
         if ( !$user->has_cap('manage_tainacan') ) {
             $control_collections_ids = Control_Collections::get_instance()->get_control_collections_ids();
             $args['post__not_in'] = $control_collections_ids;

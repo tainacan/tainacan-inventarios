@@ -244,7 +244,7 @@ class Inventario_Post_Type {
             'tainacan-inventarios-item-form',
             plugins_url( 'assets/js/inventario-item-form.js', dirname( __DIR__ ) . '/functions.php' ),
             array(),
-            defined( 'TAINACAN_INVENTARIOS_VERSION' ) ? TAINACAN_INVENTARIOS_VERSION : '0.2.1',
+            defined( 'TAINACAN_INVENTARIOS_VERSION' ) ? TAINACAN_INVENTARIOS_VERSION : '0.3.0',
             true
         );
 

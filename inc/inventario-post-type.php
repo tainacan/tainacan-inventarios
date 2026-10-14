@@ -11,11 +11,11 @@
  * inventário", ou seja, aquela que guardará os dados estruturados relacionados a cada inventário 
  * (seus itens). Também está implementada a lógica para criação de um Post Type 'inventarios'. Este
  * tipo de post permite que sejam criadas páginas usando editor de blocos do WordPress com 
- * flexibilidade para se customizar aparência de um conteúdo editorial mais livre. Ao se criar um
- * Novo Inventário, um padrão de blocos é carregado. Também pode ser criado um padrão e definido
- * como padrão para novos inventários. Por fim há a lógica para se estabelecer um vínculo entre o
- * item da coleção com a página de inventário, fazendo com que os dois tipos de dados possam ser
- * mostrados juntos para o público, mesmo que geridos por ferramentas diferentes (Tainacan e Gutenberg).
+ * flexibilidade para se customizar aparência de um conteúdo editorial mais livre. Um padrão de
+ * blocos pode ser definido como layout inicial. Sem padrão, a página nasce em branco. A página
+ * e o item são independentes. O vínculo entre eles só serve para exibir a página no lugar do
+ * conteúdo do item. Um botão no item cria essa página já preenchida e vinculada, sem depender
+ * do salvamento do item.
  */
 
 namespace Tainacan_Inventarios;
@@ -42,6 +42,8 @@ class Inventario_Post_Type {
         // Lógica para adicionar a opção extra no formulário de item que vinculará o item a um inventário
         add_action( 'tainacan-register-admin-hooks', array( $this, 'register_hook' ) );
 		add_action( 'tainacan-insert-tainacan-item', array( $this, 'save_data' ) );
+		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_item_form_script' ) );
+		add_action( 'wp_ajax_tainacan_inventarios_create_post', array( $this, 'ajax_create_post' ) );
 		add_filter( 'tainacan-api-response-item-meta', array( $this, 'add_meta_to_response' ), 10, 2 );
 
         // Lógica para redirecionar o link do item para a página de inventário correspondente
@@ -101,7 +103,7 @@ class Inventario_Post_Type {
             )
         );
 
-        $patterns_options = '<option value="">' . esc_html__( 'Padrão do plugin', 'tainacan-inventarios' ) . '</option>';
+        $patterns_options = '<option value="">' . esc_html__( 'Nenhum', 'tainacan-inventarios' ) . '</option>';
 
         foreach ( $patterns as $pattern ) {
             $patterns_options .= '<option value="' . esc_attr( $pattern->ID ) . '">' . esc_html( $pattern->post_title ) . '</option>';
@@ -114,7 +116,7 @@ class Inventario_Post_Type {
             'type' => 'string',
             'input_type' => 'select',
             'input_inner_html' => $patterns_options,
-            'description' => __( 'Selecione um padrão de blocos criado em Aparência → Editor → Padrões. Ele será usado como layout inicial ao criar um novo inventário. Deixe em "Padrão do plugin" para usar o layout embutido.', 'tainacan-inventarios' ),
+            'description' => __( 'Selecione um padrão de blocos criado em Aparência → Editor → Padrões. Ele será o layout inicial de um novo inventário e o conteúdo copiado pelo botão no item. Sem padrão, a página nasce em branco.', 'tainacan-inventarios' ),
             'sanitize_callback' => 'sanitize_text_field',
             'default' => '',
         ) );
@@ -200,22 +202,233 @@ class Inventario_Post_Type {
 	}
 
     /**
-     * Usa da action 'tainacan-insert-tainacan-item' para de fato atualizar a entidade do item
-     * com o post meta 'tainacan-inventarios-inventario-post-id', que guardará o ID da página
-     * do inventário
+     * Grava apenas o vínculo escolhido no seletor. A criação da página acontece pelo botão, via AJAX.
      */
     function save_data( $object ) {
-        if ( ! function_exists( 'tainacan_get_api_postdata' ) ) {
+        if ( ! is_object( $object ) || ! method_exists( $object, 'can_edit' ) || ! $object->can_edit() ) {
 			return;
 		}
 
-		$post = tainacan_get_api_postdata();
+        if ( ! function_exists( 'tainacan_get_api_postdata' ) ) {
+            return;
+        }
 
-		if ( $object->can_edit() ) {
-			if ( isset( $post->{$this->inventario_post_id_field} ) ) {
-				update_post_meta( $object->get_id(), $this->inventario_post_id_field, $post->{$this->inventario_post_id_field} );
-			}
-		}
+        $post = tainacan_get_api_postdata();
+
+        if ( ! isset( $post->{$this->inventario_post_id_field} ) ) {
+            return;
+        }
+
+        $item_id = $object->get_id();
+        $submitted_link = absint( $post->{$this->inventario_post_id_field} );
+
+        if ( $this->is_live_inventario_post( $submitted_link ) ) {
+            $this->assign_inventario_post( $item_id, $submitted_link );
+            return;
+        }
+
+        if ( ! $submitted_link ) {
+            $this->clear_inventario_link( $item_id );
+        }
+    }
+
+    /**
+     * Carrega o script do botão que cria a página de inventário na tela do Tainacan.
+     */
+    function enqueue_item_form_script( $hook ) {
+        if ( false === strpos( (string) $hook, 'tainacan' ) ) {
+            return;
+        }
+
+        wp_enqueue_script(
+            'tainacan-inventarios-item-form',
+            plugins_url( 'assets/js/inventario-item-form.js', dirname( __DIR__ ) . '/functions.php' ),
+            array(),
+            defined( 'TAINACAN_INVENTARIOS_VERSION' ) ? TAINACAN_INVENTARIOS_VERSION : '0.2.1',
+            true
+        );
+
+        wp_localize_script(
+            'tainacan-inventarios-item-form',
+            'tainacanInventariosItemForm',
+            array(
+                'ajaxUrl'   => admin_url( 'admin-ajax.php' ),
+                'nonce'     => wp_create_nonce( 'tainacan_inventarios_create_post' ),
+                'action'    => 'tainacan_inventarios_create_post',
+                'fieldName' => $this->inventario_post_id_field,
+                'messages'  => array(
+                    'saveItemFirst' => __( 'Salve o item antes de criar a página de inventário.', 'tainacan-inventarios' ),
+                    'creating'      => __( 'Criando página…', 'tainacan-inventarios' ),
+                    'created'       => __( 'Página criada e vinculada a este item.', 'tainacan-inventarios' ),
+                    'alreadyLinked' => __( 'Este item já possui uma página de inventário vinculada.', 'tainacan-inventarios' ),
+                    'editPage'      => __( 'Editar a página de inventário', 'tainacan-inventarios' ),
+                    'failed'        => __( 'Não foi possível criar a página de inventário.', 'tainacan-inventarios' ),
+                ),
+            )
+        );
+    }
+
+    /**
+     * Cria a página de inventário a partir do item atual, sem passar pelo salvamento do item.
+     */
+    function ajax_create_post() {
+        check_ajax_referer( 'tainacan_inventarios_create_post', 'nonce' );
+
+        $item_id = isset( $_POST['item_id'] ) ? absint( $_POST['item_id'] ) : 0;
+
+        if ( ! $item_id || ! function_exists( 'tainacan_items' ) ) {
+            wp_send_json_error(
+                array( 'message' => __( 'Salve o item antes de criar a página de inventário.', 'tainacan-inventarios' ) ),
+                400
+            );
+        }
+
+        $item = tainacan_items()->fetch( $item_id );
+
+        if ( ! is_object( $item ) || ! method_exists( $item, 'can_edit' ) || ! $item->can_edit() ) {
+            wp_send_json_error(
+                array( 'message' => __( 'Você não pode editar este item.', 'tainacan-inventarios' ) ),
+                403
+            );
+        }
+
+        if ( ! $this->is_inventarios_collection_item( $item ) ) {
+            wp_send_json_error(
+                array( 'message' => __( 'Este item não pertence à coleção de inventários.', 'tainacan-inventarios' ) ),
+                400
+            );
+        }
+
+        $linked_post_id = absint( get_post_meta( $item_id, $this->inventario_post_id_field, true ) );
+
+        if ( $this->is_live_inventario_post( $linked_post_id ) ) {
+            wp_send_json_success(
+                array(
+                    'postId'  => $linked_post_id,
+                    'title'   => get_the_title( $linked_post_id ),
+                    'editUrl' => get_edit_post_link( $linked_post_id, 'raw' ),
+                    'created' => false,
+                )
+            );
+        }
+
+        if ( ! $this->user_can_create_inventario_post() ) {
+            wp_send_json_error(
+                array( 'message' => __( 'Você não pode criar páginas de inventário.', 'tainacan-inventarios' ) ),
+                403
+            );
+        }
+
+        $post_id = $this->create_inventario_post_for_item( $item );
+
+        if ( is_wp_error( $post_id ) || ! $post_id ) {
+            wp_send_json_error(
+                array( 'message' => __( 'Não foi possível criar a página de inventário.', 'tainacan-inventarios' ) ),
+                500
+            );
+        }
+
+        wp_send_json_success(
+            array(
+                'postId'  => $post_id,
+                'title'   => get_the_title( $post_id ),
+                'editUrl' => get_edit_post_link( $post_id, 'raw' ),
+                'created' => true,
+            )
+        );
+    }
+
+    /**
+     * O tipo inventarios usa as capacidades de post, então criar uma página exige edit_posts.
+     */
+    private function user_can_create_inventario_post() {
+        $post_type = get_post_type_object( 'inventarios' );
+
+        if ( ! $post_type || empty( $post_type->cap->create_posts ) ) {
+            return false;
+        }
+
+        return current_user_can( $post_type->cap->create_posts );
+    }
+
+    /**
+     * Aponta o item para uma página de inventário já existente, sem alterar o conteúdo dela.
+     */
+    private function assign_inventario_post( $item_id, $post_id ) {
+        update_post_meta( $item_id, $this->inventario_post_id_field, $post_id );
+    }
+
+    /**
+     * Remove o vínculo usado no redirecionamento do item. A página de inventário permanece.
+     */
+    private function clear_inventario_link( $item_id ) {
+        delete_post_meta( $item_id, $this->inventario_post_id_field );
+    }
+
+    /**
+     * Uma página vinculada conta como existente enquanto não estiver na lixeira ou excluída.
+     */
+    private function is_live_inventario_post( $post_id ) {
+        $post_id = absint( $post_id );
+
+        if ( ! $post_id ) {
+            return false;
+        }
+
+        $post = get_post( $post_id );
+
+        if ( ! $post || 'inventarios' !== $post->post_type ) {
+            return false;
+        }
+
+        return in_array( $post->post_status, array( 'publish', 'private', 'draft', 'pending', 'future' ), true );
+    }
+
+    /**
+     * Cria a página de inventário vinculada ao item e grava o itemId nos blocos Tainacan.
+     * A página nasce como rascunho; a publicação fica com o fluxo normal do WordPress.
+     */
+    private function create_inventario_post_for_item( $item ) {
+        $item_id = $item->get_id();
+        $title = method_exists( $item, 'get_title' ) ? $item->get_title() : '';
+
+        if ( '' === trim( (string) $title ) || 'Auto Draft' === $title ) {
+            $title = __( 'Inventário', 'tainacan-inventarios' );
+        }
+
+        $author_id = method_exists( $item, 'get_author_id' ) ? absint( $item->get_author_id() ) : get_current_user_id();
+
+        $post_id = wp_insert_post(
+            array(
+                'post_type'    => 'inventarios',
+                'post_status'  => 'draft',
+                'post_title'   => $title,
+                'post_content' => $this->get_inventario_post_content_for_item( $item_id ),
+                'post_author'  => $author_id ? $author_id : get_current_user_id(),
+            ),
+            true
+        );
+
+        if ( is_wp_error( $post_id ) || ! $post_id ) {
+            return is_wp_error( $post_id ) ? $post_id : new \WP_Error( 'tainacan_inventarios_create_post', __( 'Não foi possível criar a página de inventário.', 'tainacan-inventarios' ) );
+        }
+
+        update_post_meta( $item_id, $this->inventario_post_id_field, $post_id );
+
+        return $post_id;
+    }
+
+    /**
+     * Indica se o item pertence à coleção configurada como coleção de inventários.
+     */
+    private function is_inventarios_collection_item( $item ) {
+        $collection_id = absint( $this->get_inventarios_collection_id() );
+
+        if ( ! $collection_id || ! is_object( $item ) || ! method_exists( $item, 'get_collection_id' ) ) {
+            return false;
+        }
+
+        return absint( $item->get_collection_id() ) === $collection_id;
     }
 
     /**
@@ -263,9 +476,20 @@ class Inventario_Post_Type {
                     </span>
                 </div>
                 <p class="help">
-                    <?php _e( 'Escolha uma página da lista de páginas de inventário para mostrar mais informações sobre o item, além dos metadados.', 'tainacan-inventarios'); ?>
+                    <?php _e( 'A página de inventário é independente do item. Escolha uma página existente para exibi-la no lugar do conteúdo deste item. A opção vazia remove só o vínculo.', 'tainacan-inventarios'); ?>
                 </p>
             </div>
+            <?php if ( $this->user_can_create_inventario_post() ) : ?>
+            <div class="field">
+                <button type="button" class="button" id="tainacan-inventarios-create-post">
+                    <?php _e( 'Criar página de inventário a partir deste item', 'tainacan-inventarios' ); ?>
+                </button>
+                <p class="help" id="tainacan-inventarios-create-post-feedback" hidden></p>
+                <p class="help">
+                    <?php _e( 'Cria agora uma página, copia o padrão de blocos selecionado e preenche os blocos Tainacan com este item. Sem padrão, a página nasce em branco. Se já houver uma página vinculada, ela não é alterada. Se essa página for excluída, use o botão de novo.', 'tainacan-inventarios'); ?>
+                </p>
+            </div>
+            <?php endif; ?>
 		</div>
 		<?php
         
@@ -298,10 +522,11 @@ class Inventario_Post_Type {
     }
 
     /**
-     * Template inicial de novas páginas de inventário.
-     * Usa o padrão de blocos selecionado nas configurações ou o layout embutido do plugin.
+     * Template inicial de novas páginas de inventário, a partir do padrão selecionado.
+     * Sem padrão, o editor abre em branco.
      */
     function get_inventario_template() {
+        $template = array();
         $pattern_id = absint( $this->get_inventarios_default_pattern_id() );
 
         if ( $pattern_id ) {
@@ -309,71 +534,10 @@ class Inventario_Post_Type {
 
             if ( $pattern_post && $pattern_post->post_type === 'wp_block' && $pattern_post->post_status === 'publish' ) {
                 $template = $this->blocks_to_template( parse_blocks( $pattern_post->post_content ) );
-
-                if ( ! empty( $template ) ) {
-                    return apply_filters( 'tainacan_inventarios_default_template', $template );
-                }
             }
         }
 
-        return apply_filters( 'tainacan_inventarios_default_template', $this->get_builtin_inventario_template() );
-    }
-
-    /**
-     * Layout padrão embutido no plugin, usado quando nenhum padrão é selecionado.
-     */
-    function get_builtin_inventario_template() {
-        return array(
-            array(
-                'core/columns',
-                array(
-                    'align' => 'wide',
-                ),
-                array(
-                    array(
-                        'core/column',
-                        array(
-                            'width' => '33.33%',
-                        ),
-                        array(
-                            array(
-                                'tainacan/item-metadata-sections',
-                                array(
-                                    'collectionId' => $this->get_inventarios_collection_id(),
-                                ),
-                            ),
-                        ),
-                    ),
-                    array(
-                        'core/column',
-                        array(
-                            'width' => '66.66%',
-                        ),
-                        array(
-                            array(
-                                'core/post-title',
-                                array(
-                                    'placeholder' => __( 'Título do Inventário', 'tainacan-inventarios' ),
-                                    'level'       => 1,
-                                ),
-                            ),
-                            array(
-                                'core/paragraph',
-                                array(
-                                    'placeholder' => __( 'Insira aqui blocos apresentando o Inventário', 'tainacan-inventarios' ),
-                                ),
-                            ),
-                            array(
-                                'tainacan/related-items-list',
-                                array(
-                                    'collectionId' => $this->get_inventarios_collection_id(),
-                                ),
-                            ),
-                        ),
-                    ),
-                ),
-            ),
-        );
+        return apply_filters( 'tainacan_inventarios_default_template', $template );
     }
 
     /**
@@ -404,6 +568,140 @@ class Inventario_Post_Type {
         }
 
         return $template;
+    }
+
+    /**
+     * Conteúdo da página criada junto com o item.
+     * O padrão escolhido é copiado como foi salvo, para o HTML dos blocos continuar
+     * igual ao que o editor espera. Só os atributos de item são preenchidos.
+     */
+    private function get_inventario_post_content_for_item( $item_id ) {
+        $pattern_id = absint( $this->get_inventarios_default_pattern_id() );
+
+        if ( $pattern_id ) {
+            $pattern_post = get_post( $pattern_id );
+
+            if ( $pattern_post && 'wp_block' === $pattern_post->post_type && 'publish' === $pattern_post->post_status ) {
+                $blocks = $this->apply_item_id_to_parsed_blocks( parse_blocks( $pattern_post->post_content ), $item_id );
+
+                return serialize_blocks( $blocks );
+            }
+        }
+
+        return '';
+    }
+
+    /**
+     * Preenche itemId nos blocos já parseados, preservando innerHTML e innerContent.
+     */
+    private function apply_item_id_to_parsed_blocks( $blocks, $item_id ) {
+        $item_id = absint( $item_id );
+        $collection_id = $this->get_inventarios_collection_id();
+        $block_names = $this->get_item_id_block_names();
+        $runtime_attributes = array(
+            'metadataSectionsRequestSource',
+            'metadataSectionRequestSource',
+            'itemMetadataRequestSource',
+        );
+
+        foreach ( $blocks as $index => $block ) {
+            if ( empty( $block['blockName'] ) ) {
+                continue;
+            }
+
+            if ( ! isset( $block['attrs'] ) || ! is_array( $block['attrs'] ) ) {
+                $block['attrs'] = array();
+            }
+
+            if ( in_array( $block['blockName'], $block_names, true ) ) {
+                $block['attrs']['itemId'] = $this->item_id_attribute_for_block( $block['blockName'], $item_id );
+
+                if ( empty( $block['attrs']['collectionId'] ) && $collection_id ) {
+                    $block['attrs']['collectionId'] = $this->collection_id_attribute_for_block( $block['blockName'], $collection_id );
+                }
+
+                $block['attrs'] = $this->stamp_item_id_in_block_templates( $block['attrs'], $item_id );
+            }
+
+            foreach ( $runtime_attributes as $runtime_attribute ) {
+                unset( $block['attrs'][ $runtime_attribute ] );
+            }
+
+            if ( ! empty( $block['innerBlocks'] ) ) {
+                $block['innerBlocks'] = $this->apply_item_id_to_parsed_blocks( $block['innerBlocks'], $item_id );
+            }
+
+            $blocks[ $index ] = $block;
+        }
+
+        return $blocks;
+    }
+
+    /**
+     * Atualiza itemId dentro de templates de blocos guardados em atributos, como metadataSectionsTemplate.
+     */
+    private function stamp_item_id_in_block_templates( $value, $item_id ) {
+        if ( ! is_array( $value ) ) {
+            return $value;
+        }
+
+        if ( isset( $value[0] ) && is_string( $value[0] ) && 0 === strpos( $value[0], 'tainacan/' ) ) {
+            if ( isset( $value[1] ) && is_array( $value[1] ) && array_key_exists( 'itemId', $value[1] ) ) {
+                $value[1]['itemId'] = $this->item_id_attribute_for_block( $value[0], $item_id );
+                $value[1] = $this->stamp_item_id_in_block_templates( $value[1], $item_id );
+            }
+
+            if ( isset( $value[2] ) && is_array( $value[2] ) ) {
+                $value[2] = $this->stamp_item_id_in_block_templates( $value[2], $item_id );
+            }
+
+            return $value;
+        }
+
+        foreach ( $value as $key => $child ) {
+            if ( is_array( $child ) ) {
+                $value[ $key ] = $this->stamp_item_id_in_block_templates( $child, $item_id );
+            }
+        }
+
+        return $value;
+    }
+
+    /**
+     * Blocos Tainacan que devem receber o ID do item recém-criado.
+     */
+    private function get_item_id_block_names() {
+        return apply_filters(
+            'tainacan_inventarios_item_id_blocks',
+            array(
+                'tainacan/item-metadata-sections',
+                'tainacan/item-metadata-section',
+                'tainacan/item-metadata',
+                'tainacan/related-items-list',
+            )
+        );
+    }
+
+    /**
+     * item-metadata-sections declara itemId como integer; related-items-list, como string.
+     */
+    private function item_id_attribute_for_block( $block_name, $item_id ) {
+        if ( 'tainacan/related-items-list' === $block_name ) {
+            return (string) absint( $item_id );
+        }
+
+        return absint( $item_id );
+    }
+
+    /**
+     * collectionId segue o mesmo tipo declarado no block.json de cada bloco.
+     */
+    private function collection_id_attribute_for_block( $block_name, $collection_id ) {
+        if ( 'tainacan/related-items-list' === $block_name ) {
+            return (string) $collection_id;
+        }
+
+        return absint( $collection_id );
     }
 
     /**

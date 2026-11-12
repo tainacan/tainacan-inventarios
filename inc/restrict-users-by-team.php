@@ -33,6 +33,19 @@ class Restrict_Users_By_Team {
     private $team_metadatum_id_field = 'tainacan_inventarios_team_metadatum_id';
     private $restrictive_roles_field = 'tainacan_inventarios_restrictive_roles';
 
+    /**
+     * Inventários por página ao montar a lista de IDs permitidos.
+     * A coleção tem cerca de 300 itens; 100 mantém cada consulta curta.
+     */
+    private $allowed_inventarios_per_page = 100;
+
+    /**
+     * IDs já resolvidos neste pedido, por usuário.
+     *
+     * @var array<int, int[]|false>
+     */
+    private $allowed_inventarios_ids_by_user = array();
+
     protected function init() {
 
         // Lógica para adicionar a opção de metadado de equipe nas configurações do Tainacan
@@ -114,42 +127,101 @@ class Restrict_Users_By_Team {
     }
 
     /**
-     * Método para obter os ids dos itens da coleção de inventário que o usuário atual tem acesso
-     * baseado no metadado de equipe.
+     * IDs dos itens da coleção de inventário cuja equipe inclui o usuário atual.
+     *
+     * O fetch do Tainacan, sem posts_per_page, devolve só o tamanho de página
+     * do site. A primeira página conta quantos inventários foram selecionados
+     * (found_posts) e as seguintes trazem o restante dos IDs.
+     *
+     * @return int[]|false Lista de IDs, ou false se a coleção ou o metadado de equipe não estão configurados.
      */
     public function get_current_user_allowed_inventarios_ids() {
-        $restrictive_ids = array();
+        $user_id = get_current_user_id();
+
+        if ( array_key_exists( $user_id, $this->allowed_inventarios_ids_by_user ) ) {
+            return $this->allowed_inventarios_ids_by_user[ $user_id ];
+        }
 
         $inventario_collection_id = Inventario_Post_Type::get_instance()->get_inventarios_collection_id();
         $team_metadatum_id = $this->get_team_metadatum_id();
 
         if ( !$inventario_collection_id || !$team_metadatum_id ) {
+            $this->allowed_inventarios_ids_by_user[ $user_id ] = false;
             return false;
         }
 
-        $items = \tainacan_items()->fetch(
-            array(
-                'meta_query' => [
-                    [
-                        'key'   => $team_metadatum_id,
-                        'value' => [ get_current_user_id() ],
-                        'compare' => 'IN'
-                    ]
-                ],
-                'status' => 'any'
-            ),
-            $inventario_collection_id,
-            'OBJECT'
+        $per_page = max( 1, (int) $this->allowed_inventarios_per_page );
+        $args = array(
+            'meta_query' => [
+                [
+                    'key'   => $team_metadatum_id,
+                    'value' => [ $user_id ],
+                    'compare' => 'IN'
+                ]
+            ],
+            'status' => 'any',
+            'fields' => 'ids',
+            'posts_per_page' => $per_page,
+            'paged' => 1,
         );
 
-        $restrictive_ids = array_map(function($item) { return $item->get_id(); }, $items);
-        return $restrictive_ids;
+        $query = \tainacan_items()->fetch( $args, $inventario_collection_id );
+
+        if ( !$query instanceof \WP_Query ) {
+            $this->allowed_inventarios_ids_by_user[ $user_id ] = array();
+            return array();
+        }
+
+        $selected = (int) $query->found_posts;
+        $ids = $this->inventario_ids_from_query( $query );
+        $pages = (int) $query->max_num_pages;
+
+        for ( $page = 2; $page <= $pages && count( $ids ) < $selected; $page++ ) {
+            $args['paged'] = $page;
+            $args['no_found_rows'] = true;
+
+            $page_query = \tainacan_items()->fetch( $args, $inventario_collection_id );
+
+            if ( !$page_query instanceof \WP_Query || empty( $page_query->posts ) ) {
+                break;
+            }
+
+            $ids = array_merge( $ids, $this->inventario_ids_from_query( $page_query ) );
+        }
+
+        $ids = array_values( array_unique( $ids ) );
+        $this->allowed_inventarios_ids_by_user[ $user_id ] = $ids;
+
+        return $ids;
     }
 
     /**
-     * Método para obter os IDs de usuário que tem permissão para acessar um determinado
-     * item, baseando-se na presença ou não deles no metadado de equipe do item de inventário
-     * relacionado.
+     * Normaliza os IDs de uma consulta de itens já pedida com fields = ids.
+     *
+     * @param \WP_Query $query
+     * @return int[]
+     */
+    private function inventario_ids_from_query( $query ) {
+        $ids = array();
+
+        foreach ( (array) $query->posts as $post_id ) {
+            $post_id = absint( $post_id );
+
+            if ( $post_id ) {
+                $ids[] = $post_id;
+            }
+        }
+
+        return $ids;
+    }
+
+    /**
+     * IDs de usuário com permissão de acessar o item, via metadado de equipe do inventário
+     * relacionado (ou do próprio inventário).
+     *
+     * @return string[]|false|null Lista de usuários da equipe; false se a restrição não está
+     *                             configurada; null se o item ainda não tem inventário/equipe
+     *                             definidos (restrição não se aplica).
      */
     public function get_allowed_users_ids($item) {
         $inventario_collection_id = Inventario_Post_Type::get_instance()->get_inventarios_collection_id();
@@ -160,6 +232,7 @@ class Restrict_Users_By_Team {
         }
 
         $team_users = [];
+        $has_restriction_target = false;
         $item_metadata = $item->get_metadata();
 
         foreach ($item_metadata as $item_metadatum) {
@@ -174,7 +247,19 @@ class Restrict_Users_By_Team {
                     $options['collection_id'] == $inventario_collection_id
                 ) {
                     $inventario_items_ids = $item_metadatum->get_value();
+
+                    if ( $inventario_items_ids === null || $inventario_items_ids === '' || $inventario_items_ids === [] ) {
+                        continue;
+                    }
+
                     $inventario_items_ids = is_array($inventario_items_ids) ? $inventario_items_ids: [ $inventario_items_ids ];
+                    $inventario_items_ids = array_filter( $inventario_items_ids );
+
+                    if ( empty( $inventario_items_ids ) ) {
+                        continue;
+                    }
+
+                    $has_restriction_target = true;
 
                     // Se está relacionado com a coleção do Inventário, obtemos os usuários da equipe do item de inventário
                     foreach ($inventario_items_ids as $inventario_item_id) {
@@ -192,11 +277,18 @@ class Restrict_Users_By_Team {
                 $inventario_team_users = get_post_meta( $item->get_id(), $team_metadatum_id );
 
                 if ( $inventario_team_users ) {
+                    $has_restriction_target = true;
                     $inventario_team_users = is_array($inventario_team_users) ? $inventario_team_users: [ $inventario_team_users ];
                     $team_users = array_merge($team_users, $inventario_team_users);
                 }
             }
         }
+
+        // Sem inventário relacionado (ou sem equipe no inventário), a restrição por equipe não se aplica
+        if ( ! $has_restriction_target ) {
+            return null;
+        }
+
         return $team_users;
     }
 
@@ -220,9 +312,10 @@ class Restrict_Users_By_Team {
                     // Obtém os IDs dos usuários permitidos para ver e editar o item (aqueles que fazem parte da equipe)
                     $allowed_users_ids = $this->get_allowed_users_ids($current_item);
                     
-                    // Se o item está em uma coleção de controle, não há restrição de acesso
+                    // Sem configuração, coleção de controle, ou item ainda sem inventário/equipe: sem restrição extra
                     if ( 
                         $allowed_users_ids === false ||
+                        $allowed_users_ids === null ||
                         in_array($current_collection_id, $control_collections_ids)
                     ) {
                         return $allcaps;
@@ -277,10 +370,18 @@ class Restrict_Users_By_Team {
                         $args['meta_query'] = array();
                     }
 
+                    // Na equipe OU ainda sem metadado de equipe (ex.: rascunho)
                     $args['meta_query'][] = [
-                        'key' => $team_metadatum_id,
-                        'value' => [ $user->id ],
-                        'compare' => 'IN'
+                        'relation' => 'OR',
+                        [
+                            'key' => $team_metadatum_id,
+                            'value' => [ $user->id ],
+                            'compare' => 'IN'
+                        ],
+                        [
+                            'key' => $team_metadatum_id,
+                            'compare' => 'NOT EXISTS'
+                        ]
                     ];
                 }
 
@@ -320,10 +421,18 @@ class Restrict_Users_By_Team {
                         $args['meta_query'] = array();
                     }
 
+                    // Relacionado a inventário permitido OU ainda sem inventário (restrição não se aplica)
                     $args['meta_query'][] = [
-                        'key' => $relationship_metadatum->get_id(),
-                        'value' => empty($inventario_items_ids)? [-1] : $inventario_items_ids,
-                        'compare' => 'IN'
+                        'relation' => 'OR',
+                        [
+                            'key' => $relationship_metadatum->get_id(),
+                            'value' => empty($inventario_items_ids)? [-1] : $inventario_items_ids,
+                            'compare' => 'IN'
+                        ],
+                        [
+                            'key' => $relationship_metadatum->get_id(),
+                            'compare' => 'NOT EXISTS'
+                        ]
                     ];
                 }
             }
